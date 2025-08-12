@@ -15,8 +15,11 @@ use super::{
     ext::{AsObject, PyRefExact, PyResult},
     payload::PyObjectPayload,
 };
-use crate::object::traverse::{MaybeTraverse, Traverse, TraverseFn};
 use crate::object::traverse_object::PyObjVTable;
+use crate::{
+    Context,
+    object::traverse::{MaybeTraverse, Traverse, TraverseFn},
+};
 use crate::{
     builtins::{PyDictRef, PyType, PyTypeRef},
     common::{
@@ -29,12 +32,14 @@ use crate::{
 };
 use itertools::Itertools;
 use std::{
+    alloc::Layout,
     any::TypeId,
     borrow::Borrow,
     cell::UnsafeCell,
     fmt,
     marker::PhantomData,
     mem::ManuallyDrop,
+    ops::Add,
     ops::Deref,
     ptr::{self, NonNull},
 };
@@ -76,6 +81,25 @@ use std::{
 #[derive(Debug)]
 pub(super) struct Erased;
 
+pub unsafe fn drop_dealloc_py_inner(ptr: usize) {
+    let leak_id: u32 = unsafe { std::ptr::read(ptr as *const _) };
+
+    let layout_alignment = std::mem::align_of::<(usize, usize)>();
+    let layout_offset = (4 + layout_alignment - 1) & !(layout_alignment - 1);
+
+    let layout_ptr = ptr.add(layout_offset) as *const (usize, usize);
+    let layout = unsafe { ptr::read(layout_ptr) };
+
+    if leak_id == LEAK_ID {
+        unsafe {
+            std::alloc::dealloc(
+                ptr as *mut u8,
+                Layout::from_size_align_unchecked(layout.0, layout.1),
+            );
+        }
+    }
+}
+
 pub(super) unsafe fn drop_dealloc_obj<T: PyObjectPayload>(x: *mut PyObject) {
     drop(unsafe { Box::from_raw(x as *mut PyInner<T>) });
 }
@@ -97,11 +121,15 @@ pub(super) unsafe fn try_trace_obj<T: PyObjectPayload>(
     payload.try_traverse(tracer_fn)
 }
 
+static LEAK_ID: u32 = 1888888888;
+
 /// This is an actual python object. It consists of a `typ` which is the
 /// python class, and carries some rust payload optionally. This rust
 /// payload can be a rust float or rust int in case of float and int objects.
 #[repr(C)]
 pub(super) struct PyInner<T> {
+    pub leak_id: u32,
+    pub layout: (usize, usize),
     pub(super) ref_count: RefCount,
     // TODO: move typeid into vtable once TypeId::of is const
     pub(super) typeid: TypeId,
@@ -377,6 +405,7 @@ impl PyWeak {
             let node_ptr = unsafe { NonNull::new_unchecked(py_inner as *mut Py<Self>) };
             // the list doesn't have ownership over its PyRef<PyWeak>! we're being dropped
             // right now so that should be obvious!!
+
             std::mem::forget(unsafe { guard.list.remove(node_ptr) });
             guard.ref_count -= 1;
             if Some(node_ptr) == guard.generic_weakref {
@@ -446,7 +475,10 @@ impl InstanceDict {
 impl<T: PyObjectPayload> PyInner<T> {
     fn new(payload: T, typ: PyTypeRef, dict: Option<PyDictRef>) -> Box<Self> {
         let member_count = typ.slots.member_count;
-        Box::new(Self {
+        let layout = Layout::new::<PyInner<T>>();
+        let boxed = Box::new(Self {
+            leak_id: LEAK_ID,
+            layout: (layout.size(), layout.align()),
             ref_count: RefCount::new(),
             typeid: T::payload_type_id(),
             vtable: PyObjVTable::of::<T>(),
@@ -458,7 +490,12 @@ impl<T: PyObjectPayload> PyInner<T> {
                 .take(member_count)
                 .collect_vec()
                 .into_boxed_slice(),
-        })
+        });
+
+        Context::with_pyrefs(|refs| {
+            refs.push(boxed.as_ref() as *const _ as usize);
+        });
+        boxed
     }
 }
 
@@ -1228,8 +1265,13 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
             slots: object::PyBaseObject::make_slots(),
             heaptype_ext: None,
         };
+
+        let layout = Layout::new::<PyInner<PyType>>();
+        let layout = (layout.size(), layout.align());
         let type_type_ptr = Box::into_raw(Box::new(partially_init!(
             PyInner::<PyType> {
+                leak_id: LEAK_ID,
+                layout: layout,
                 ref_count: RefCount::new(),
                 typeid: TypeId::of::<PyType>(),
                 vtable: PyObjVTable::of::<PyType>(),
@@ -1242,6 +1284,8 @@ pub(crate) fn init_type_hierarchy() -> (PyTypeRef, PyTypeRef, PyTypeRef) {
         )));
         let object_type_ptr = Box::into_raw(Box::new(partially_init!(
             PyInner::<PyType> {
+                leak_id: LEAK_ID,
+                layout: layout,
                 ref_count: RefCount::new(),
                 typeid: TypeId::of::<PyType>(),
                 vtable: PyObjVTable::of::<PyType>(),

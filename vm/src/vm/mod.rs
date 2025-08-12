@@ -985,6 +985,15 @@ impl VirtualMachine {
     }
 }
 
+impl Drop for VirtualMachine {
+    fn drop(&mut self) {
+        // Note(sagar): since vm is dropped, we are okay with dropping ctx?
+        unsafe {
+            PyRc::decrement_strong_count(PyRc::as_ptr(&self.ctx));
+        }
+    }
+}
+
 impl AsRef<Context> for VirtualMachine {
     fn as_ref(&self) -> &Context {
         &self.ctx

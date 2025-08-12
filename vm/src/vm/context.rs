@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use crate::{
     PyResult, VirtualMachine,
     builtins::{
@@ -21,7 +23,7 @@ use crate::{
         PyMethodFlags,
     },
     intern::{InternableString, MaybeInternedString, StringPool},
-    object::{Py, PyObjectPayload, PyObjectRef, PyPayload, PyRef},
+    object::{Py, PyObjectPayload, PyObjectRef, PyPayload, PyRef, drop_dealloc_py_inner},
     types::{PyTypeFlags, PyTypeSlots, TypeZoo},
 };
 use malachite_bigint::BigInt;
@@ -256,6 +258,10 @@ declare_const_name! {
     utf_8: "utf-8",
 }
 
+thread_local! {
+    static PYINNER_REFS_ALLOCS: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(15_000));
+}
+
 // Basic objects:
 impl Context {
     pub const INT_CACHE_POOL_RANGE: std::ops::RangeInclusive<i32> = (-5)..=256;
@@ -266,6 +272,25 @@ impl Context {
             static CONTEXT: PyRc<Context>;
         }
         CONTEXT.get_or_init(|| PyRc::new(Self::init_genesis()))
+    }
+
+    pub fn with_pyrefs<'a, F>(f: F)
+    where
+        F: FnOnce(&mut Vec<usize>),
+    {
+        PYINNER_REFS_ALLOCS.with_borrow_mut(|v| f(v));
+    }
+
+    pub fn clear_pyrefs() {
+        Self::with_pyrefs(|refs| {
+            loop {
+                if let Some(r) = refs.pop() {
+                    unsafe { drop_dealloc_py_inner(r) };
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
     fn init_genesis() -> Self {
