@@ -660,3 +660,9 @@ impl AsRef<Self> for Context {
         self
     }
 }
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        Context::clear_pyrefs();
+    }
+}
