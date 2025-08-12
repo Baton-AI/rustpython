@@ -91,6 +91,7 @@ pub unsafe fn drop_dealloc_py_inner(ptr: usize) {
     let layout = unsafe { ptr::read(layout_ptr) };
 
     if leak_id == LEAK_ID {
+        unsafe { std::ptr::write(ptr as *const u32 as *mut _, 1) };
         unsafe {
             std::alloc::dealloc(
                 ptr as *mut u8,
@@ -101,7 +102,10 @@ pub unsafe fn drop_dealloc_py_inner(ptr: usize) {
 }
 
 pub(super) unsafe fn drop_dealloc_obj<T: PyObjectPayload>(x: *mut PyObject) {
-    drop(unsafe { Box::from_raw(x as *mut PyInner<T>) });
+    let leak_id: u32 = unsafe { std::ptr::read(x as *const _) };
+    if leak_id == LEAK_ID {
+        drop(unsafe { Box::from_raw(x as *mut PyInner<T>) });
+    }
 }
 pub(super) unsafe fn debug_obj<T: PyObjectPayload>(
     x: &PyObject,
@@ -141,6 +145,12 @@ pub(super) struct PyInner<T> {
     pub(super) slots: Box<[PyRwLock<Option<PyObjectRef>>]>,
 
     pub(super) payload: T,
+}
+
+impl<T> Drop for PyInner<T> {
+    fn drop(&mut self) {
+        self.leak_id = 1;
+    }
 }
 
 impl<T: fmt::Debug> fmt::Debug for PyInner<T> {

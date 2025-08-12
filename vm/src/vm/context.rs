@@ -258,10 +258,6 @@ declare_const_name! {
     utf_8: "utf-8",
 }
 
-thread_local! {
-    static PYINNER_REFS_ALLOCS: RefCell<Vec<usize>> = RefCell::new(Vec::with_capacity(15_000));
-}
-
 // Basic objects:
 impl Context {
     pub const INT_CACHE_POOL_RANGE: std::ops::RangeInclusive<i32> = (-5)..=256;
@@ -278,7 +274,12 @@ impl Context {
     where
         F: FnOnce(&mut Vec<usize>),
     {
-        PYINNER_REFS_ALLOCS.with_borrow_mut(|v| f(v));
+        rustpython_common::static_cell! {
+            static PYINNER_REFS_ALLOCS: RefCell<Vec<usize>>;
+        }
+        let pyrefs = PYINNER_REFS_ALLOCS.get_or_init(|| RefCell::new(Vec::with_capacity(20_000)));
+        let mut arr = pyrefs.borrow_mut();
+        f(&mut arr);
     }
 
     pub fn clear_pyrefs() {
@@ -290,6 +291,7 @@ impl Context {
                     break;
                 }
             }
+            *refs = Vec::with_capacity(0);
         });
     }
 
